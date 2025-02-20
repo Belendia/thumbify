@@ -1,7 +1,10 @@
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { type DefaultSession, type NextAuthConfig } from "next-auth";
+import "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import { signInSchema } from "~/schemas/auth";
+import bcrypt from "bcryptjs";
+import { ZodError } from "zod";
 
 import { db } from "~/server/db";
 
@@ -26,6 +29,12 @@ declare module "next-auth" {
   // }
 }
 
+declare module "next-auth/jwt" {
+  interface JWT {
+    id: string;
+  }
+}
+
 /**
  * Options for NextAuth.js used to configure adapters, providers, callbacks, etc.
  *
@@ -40,6 +49,7 @@ export const authConfig = {
       },
       async authorize(credentials) {
         try {
+          // decode the form and validate
           const { email, password } =
             await signInSchema.parseAsync(credentials);
 
@@ -52,9 +62,23 @@ export const authConfig = {
           if (!user) {
             throw new Error("User not found");
           }
+
+          // compare the password
+          const validPassword = await bcrypt.compare(password, user.password);
+
+          if (!validPassword) {
+            return null; // it will tell the login is successful and the user shouldn't login
+          }
+
+          // return the user if authentication is successful
+          return user;
         } catch (error) {
-          return null;
+          // This happens if signInSchema.parseAsync fails. e.g. invalid email
+          if (error instanceof ZodError) {
+            return null;
+          }
         }
+        return null;
       },
     }),
     /**
@@ -69,12 +93,24 @@ export const authConfig = {
   ],
   adapter: PrismaAdapter(db),
   callbacks: {
-    session: ({ session, user }) => ({
-      ...session,
-      user: {
-        ...session.user,
-        id: user.id,
-      },
-    }),
+    jwt: ({ token, user }) => {
+      if (user && user.id) {
+        token.id = user.id;
+      }
+      return token;
+    },
+    session: ({ session, token }) => {
+      if (token && token.id) {
+        session.user.id = token.id;
+      }
+      return session;
+    },
+  },
+  pages: {
+    signIn: "/signin",
+  },
+  secret: process.env.NEXTAUTH_SECRET,
+  session: {
+    strategy: "jwt",
   },
 } satisfies NextAuthConfig;
